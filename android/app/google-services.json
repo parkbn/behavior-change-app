@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "776733084174",
+    "project_id": "healthflexx-421f3",
+    "storage_bucket": "healthflexx-421f3.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:776733084174:android:62e0e61d5caf5b42c44a5f",
+        "android_client_info": {
+          "package_name": "com.healthflexx.behavior_change_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD_C-1pMtyxn4IYCZcb8WopMQJ9We-AqEo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
