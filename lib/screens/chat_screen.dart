@@ -94,7 +94,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('HealthFlexx Coach'),
+        title: const Text('HealthFlexx Coach  v1.0.1+2'),
         actions: [
           TextButton(
             onPressed: _logout,
@@ -246,16 +246,38 @@ class _MessageBubble extends StatelessWidget {
               bottomRight: Radius.circular(isUser ? 4 : 16),
             ),
           ),
-          child: Text(
-            message.content,
-            style: TextStyle(
-              color: isUser ? Colors.white : kDarkGreen,
-              fontSize: 15,
-              height: 1.4,
-            ),
+          child: Column(
+            crossAxisAlignment:
+                isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            children: [
+              Text(
+                _formatTimestamp(message.createdAt),
+                style: TextStyle(
+                  color: (isUser ? Colors.white : kDarkGreen).withValues(alpha: 0.7),
+                  fontSize: 11,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                message.content,
+                style: TextStyle(
+                  color: isUser ? Colors.white : kDarkGreen,
+                  fontSize: 15,
+                  height: 1.4,
+                ),
+              ),
+            ],
           ),
         ),
       ),
     );
+  }
+
+  static String _formatTimestamp(DateTime dt) {
+    final local = dt.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${local.year}-${two(local.month)}-${two(local.day)} '
+        '${two(local.hour)}:${two(local.minute)}:${two(local.second)}';
   }
 }
