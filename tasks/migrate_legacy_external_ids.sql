@@ -2,22 +2,40 @@
 -- Project: behavior_change_app (run in Supabase SQL editor)
 -- Source : HEALTHFLEXX Medical project, public.users (<300 rows)
 -- Join   : lower(email)
+--
+-- Strategy:
+--   1. Persist the legacy email->externalId map as a real table
+--      (public.legacy_user_map) so the insert trigger can consult
+--      it when legacy users sign up in the new app LATER.
+--   2. Backfill persons rows that already exist (legacy user who
+--      has already signed up in the new app).
+--   3. Install a BEFORE INSERT trigger that auto-links any future
+--      persons row whose email matches the legacy map, and
+--      defaults resolved_id to id::text when no legacy match.
 
 -- ============================================================
--- STEP 1 — Load the legacy dump into a staging table
+-- STEP 1 — Create/refresh the persistent legacy_user_map
 -- ============================================================
 -- Paste the FULL JSON array from the Medical project in the
 -- jsonb literal below (between $json$ ... $json$). The sample
 -- here holds the 10 records you shared; replace with the full
 -- ~300-row export before running.
 
-DROP TABLE IF EXISTS tmp_legacy_users;
-CREATE TEMP TABLE tmp_legacy_users AS
+CREATE TABLE IF NOT EXISTS public.legacy_user_map (
+  email       text PRIMARY KEY,
+  external_id text NOT NULL,
+  first_name  text,
+  last_name   text,
+  loaded_at   timestamptz NOT NULL DEFAULT now()
+);
+
+-- UPSERT the dump. Safe to re-run whenever the source changes.
+INSERT INTO public.legacy_user_map (email, external_id, first_name, last_name)
 SELECT
-  (r->>'email')       AS email,
-  (r->>'externalId')  AS external_id,
-  (r->>'firstName')   AS first_name,
-  (r->>'lastName')    AS last_name
+  lower(r->>'email')  AS email,
+  r->>'externalId'    AS external_id,
+  r->>'firstName'     AS first_name,
+  r->>'lastName'      AS last_name
 FROM jsonb_array_elements(
 $json$
 [
@@ -33,48 +51,55 @@ $json$
   {"id":"9560ac35-fbec-4981-983d-9e207a521bf8","externalId":"auth0|6862c255ab2a08d0302a3aaf","email":"emilystoffel2@gmail.com","firstName":"Emily","lastName":"Stoffel"}
 ]
 $json$::jsonb
-) AS r;
+) AS r
+WHERE r->>'externalId' IS NOT NULL
+ON CONFLICT (email) DO UPDATE
+  SET external_id = EXCLUDED.external_id,
+      first_name  = EXCLUDED.first_name,
+      last_name   = EXCLUDED.last_name,
+      loaded_at   = now();
 
--- Sanity check
-SELECT count(*) AS staged_rows FROM tmp_legacy_users;
+-- Lock down — only the trigger and admins should read this.
+-- (RLS on; no policies = no anon/auth access. Service role bypasses RLS.)
+ALTER TABLE public.legacy_user_map ENABLE ROW LEVEL SECURITY;
+
+SELECT count(*) AS staged_rows FROM public.legacy_user_map;
 
 -- ============================================================
 -- STEP 2 — Dry run: preview matches and misses
 -- ============================================================
--- Shows which legacy rows will land, and which won't.
 
--- Will be updated
-SELECT t.email, t.external_id, p.id AS person_id
-FROM tmp_legacy_users t
-JOIN public.persons p ON lower(p.email) = lower(t.email)
-ORDER BY t.email;
+-- Persons that will be updated by step 3
+SELECT m.email, m.external_id, p.id AS person_id
+FROM public.legacy_user_map m
+JOIN public.persons p ON lower(p.email) = m.email
+ORDER BY m.email;
 
--- Will NOT be updated (no matching person)
-SELECT t.email, t.external_id, t.first_name, t.last_name
-FROM tmp_legacy_users t
-LEFT JOIN public.persons p ON lower(p.email) = lower(t.email)
+-- Legacy users with no matching persons row yet
+-- (they will be auto-linked by the trigger when they sign up)
+SELECT m.email, m.external_id, m.first_name, m.last_name
+FROM public.legacy_user_map m
+LEFT JOIN public.persons p ON lower(p.email) = m.email
 WHERE p.id IS NULL
-ORDER BY t.email;
+ORDER BY m.email;
 
--- Duplicate emails in persons (would cause multiple updates per legacy row)
+-- Duplicate emails in persons (would cause multi-update per legacy row)
 SELECT lower(email) AS email, count(*)
 FROM public.persons
 GROUP BY lower(email)
 HAVING count(*) > 1;
 
 -- ============================================================
--- STEP 3 — Backfill (wrap in transaction so you can ROLLBACK)
+-- STEP 3 — Backfill persons rows that already exist
 -- ============================================================
 BEGIN;
 
 UPDATE public.persons p
-SET external_id = t.external_id,
-    resolved_id = t.external_id
-FROM tmp_legacy_users t
-WHERE lower(p.email) = lower(t.email)
-  AND t.external_id IS NOT NULL;
+SET external_id = m.external_id,
+    resolved_id = m.external_id
+FROM public.legacy_user_map m
+WHERE lower(p.email) = m.email;
 
--- Verify row count looks right, then COMMIT (or ROLLBACK to undo)
 SELECT count(*) AS rows_now_with_external_id
 FROM public.persons
 WHERE external_id LIKE 'auth0|%';
@@ -83,20 +108,33 @@ WHERE external_id LIKE 'auth0|%';
 -- ROLLBACK;
 
 -- ============================================================
--- STEP 4 — Default resolved_id := id for all future persons
+-- STEP 4 — Smart BEFORE INSERT trigger for future persons
 -- ============================================================
--- Separate BEFORE INSERT trigger so it applies to every insert
--- path (handle_new_user, admin imports, manual inserts, etc.),
--- not just the auth.users trigger.
+-- Logic:
+--   * If external_id is not set, try to find it in legacy_user_map
+--     by lower(email).
+--   * resolved_id := external_id if we matched legacy; else id::text.
+--
+-- This covers every insert path (handle_new_user from auth.users,
+-- admin imports, manual inserts), not just the auth trigger.
 
 CREATE OR REPLACE FUNCTION public.set_resolved_id_default()
 RETURNS trigger
 LANGUAGE plpgsql
+SECURITY DEFINER  -- lets the trigger read legacy_user_map past RLS
+SET search_path = public
 AS $$
 BEGIN
-  IF NEW.resolved_id IS NULL THEN
-    NEW.resolved_id := NEW.id::text;
+  IF NEW.external_id IS NULL AND NEW.email IS NOT NULL THEN
+    SELECT external_id INTO NEW.external_id
+    FROM public.legacy_user_map
+    WHERE email = lower(NEW.email);
   END IF;
+
+  IF NEW.resolved_id IS NULL THEN
+    NEW.resolved_id := COALESCE(NEW.external_id, NEW.id::text);
+  END IF;
+
   RETURN NEW;
 END;
 $$;
@@ -107,8 +145,8 @@ BEFORE INSERT ON public.persons
 FOR EACH ROW
 EXECUTE FUNCTION public.set_resolved_id_default();
 
--- Optional: also backfill resolved_id for any NEW-style persons
--- already in the table that somehow missed it (post-migration safety).
+-- Safety net: patch any new-style persons that somehow still lack
+-- resolved_id (shouldn't happen after the trigger is in place).
 UPDATE public.persons
 SET resolved_id = id::text
 WHERE resolved_id IS NULL;
