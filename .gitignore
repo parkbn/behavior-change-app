@@ -56,3 +56,6 @@ app.*.map.json
 *.jks
 *.keystore
 key.properties
+
+# Legacy PHI dumps — never commit
+tasks/legacy_users.json
